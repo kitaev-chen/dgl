@@ -120,16 +120,21 @@ def main(args):
 
     features = torch.FloatTensor(data.features)
     labels = torch.LongTensor(data.labels)
-    train_mask = torch.ByteTensor(data.train_mask)
-    val_mask = torch.ByteTensor(data.val_mask)
-    test_mask = torch.ByteTensor(data.test_mask)
+    if hasattr(torch, 'BoolTensor'):
+        train_mask = torch.BoolTensor(data.train_mask)
+        val_mask = torch.BoolTensor(data.val_mask)
+        test_mask = torch.BoolTensor(data.test_mask)
+    else:
+        train_mask = torch.ByteTensor(data.train_mask)
+        val_mask = torch.ByteTensor(data.val_mask)
+        test_mask = torch.ByteTensor(data.test_mask)
     in_feats = features.shape[1]
     n_classes = data.num_labels
     n_edges = data.graph.number_of_edges()
 
-    n_train_samples = train_mask.sum().item()
-    n_val_samples = val_mask.sum().item()
-    n_test_samples = test_mask.sum().item()
+    n_train_samples = train_mask.int().sum().item()
+    n_val_samples = val_mask.int().sum().item()
+    n_test_samples = test_mask.int().sum().item()
 
     print("""----Data statistics------'
       #Edges %d
@@ -197,6 +202,7 @@ def main(args):
                                                        args.num_neighbors,
                                                        neighbor_type='in',
                                                        shuffle=True,
+                                                       num_workers=32,
                                                        num_hops=args.n_layers+1,
                                                        seed_nodes=train_nid):
             nf.copy_from_parent()
@@ -219,6 +225,7 @@ def main(args):
         for nf in dgl.contrib.sampling.NeighborSampler(g, args.test_batch_size,
                                                        g.number_of_nodes(),
                                                        neighbor_type='in',
+                                                       num_workers=32,
                                                        num_hops=args.n_layers+1,
                                                        seed_nodes=test_nid):
             nf.copy_from_parent()

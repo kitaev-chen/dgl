@@ -8,13 +8,18 @@ from ._ffi.function import _init_internal_api
 
 # A special symbol for selecting all nodes or edges.
 ALL = "__ALL__"
+# An alias for [:]
+SLICE_FULL = slice(None, None, None)
+# Reserved column names for storing parent node/edge types and IDs in flattened heterographs
+NTYPE = '_TYPE'
+NID = '_ID'
+ETYPE = '_TYPE'
+EID = '_ID'
 
 def is_all(arg):
     """Return true if the argument is a special symbol for all nodes or edges."""
     return isinstance(arg, str) and arg == ALL
 
-def dgl_warning(msg):
-    """Print out warning messages."""
-    warnings.warn(msg)
+dgl_warning = warnings.warn  # pylint: disable=invalid-name
 
 _init_internal_api()

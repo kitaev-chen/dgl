@@ -5,14 +5,21 @@ API Reference
    :maxdepth: 2
 
    graph
+   heterograph
+   readout
+   batch_heterograph
+   nn
    init
-   batch
+   backend
    function
    traversal
    propagate
    udf
    sampler
+   sampling
    data
    transform
-   nn
-   subgraph
+   graph_store
+   nodeflow
+   random
+   model_zoo

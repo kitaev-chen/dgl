@@ -147,3 +147,13 @@ cscope.*
 *.swo
 *.un~
 *~
+
+# parameters
+*.params
+
+# vscode 
+.clangd
+.vscode
+
+# asv
+.asv

@@ -110,7 +110,7 @@ if include_libs:
     }
 
 setup(
-    name='dgl',
+    name='dgl' + os.getenv('DGL_PACKAGE_SUFFIX', ''),
     version=VERSION,
     description='Deep Graph Library',
     zip_safe=False,
@@ -121,6 +121,7 @@ setup(
         'numpy>=1.14.0',
         'scipy>=1.1.0',
         'networkx>=2.1',
+        'requests>=2.19.0',
     ],
     url='https://github.com/dmlc/dgl',
     distclass=BinaryDistribution,

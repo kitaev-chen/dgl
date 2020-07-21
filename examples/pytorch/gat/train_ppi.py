@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import argparse
 from sklearn.metrics import f1_score
 from gat import GAT
-from dgl.data.ppi import PPIDataset
+from dgl.data.ppi import LegacyPPIDataset
 from torch.utils.data import DataLoader
 
 def collate(sample):
@@ -35,7 +35,7 @@ def evaluate(feats, model, subgraph, labels, loss_fcn):
             layer.g = subgraph
         output = model(feats.float())
         loss_data = loss_fcn(output, labels.float())
-        predict = np.where(output.data.cpu().numpy() >= 0.5, 1, 0)
+        predict = np.where(output.data.cpu().numpy() >= 0., 1, 0)
         score = f1_score(labels.data.cpu().numpy(),
                          predict, average='micro')
         return score, loss_data.item()
@@ -54,9 +54,9 @@ def main(args):
     # define loss function
     loss_fcn = torch.nn.BCEWithLogitsLoss()
     # create the dataset
-    train_dataset = PPIDataset(mode='train')
-    valid_dataset = PPIDataset(mode='valid')
-    test_dataset = PPIDataset(mode='test')
+    train_dataset = LegacyPPIDataset(mode='train')
+    valid_dataset = LegacyPPIDataset(mode='valid')
+    test_dataset = LegacyPPIDataset(mode='test')
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=collate)
     valid_dataloader = DataLoader(valid_dataset, batch_size=batch_size, collate_fn=collate)
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=collate)
@@ -109,7 +109,7 @@ def main(args):
                 val_loss_list.append(val_loss)
             mean_score = np.array(score_list).mean()
             mean_val_loss = np.array(val_loss_list).mean()
-            print("F1-Score: {:.4f} ".format(mean_score))
+            print("Val F1-Score: {:.4f} ".format(mean_score))
             # early stop
             if mean_score > best_score or best_loss > mean_val_loss:
                 if mean_score > best_score and best_loss > mean_val_loss:
@@ -128,7 +128,7 @@ def main(args):
         feats = feats.to(device)
         labels = labels.to(device)
         test_score_list.append(evaluate(feats, model, subgraph, labels.float(), loss_fcn)[0])
-    print("F1-Score: {:.4f}".format(np.array(test_score_list).mean()))
+    print("Test F1-Score: {:.4f}".format(np.array(test_score_list).mean()))
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='GAT')

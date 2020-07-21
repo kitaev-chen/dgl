@@ -13,6 +13,7 @@
 #include <string>
 #include <limits>
 #include <memory>
+#include <utility>
 #include <type_traits>
 #include "c_runtime_api.h"
 #include "module.h"
@@ -24,13 +25,14 @@
 #endif
 
 namespace dgl {
-// Forward declare NodeRef and Node for extensions.
-// This header works fine without depend on NodeRef
-// as long as it is not used.
-class Node;
-class NodeRef;
-
 namespace runtime {
+
+// Forward declare ObjectRef and Object for extensions.
+// This header works fine without depend on ObjectRef
+// as long as it is not used.
+class Object;
+class ObjectRef;
+
 // forward declarations
 class DGLArgs;
 class DGLArgValue;
@@ -295,32 +297,6 @@ class DGLArgs {
 };
 
 /*!
- * \brief Convert type code to its name
- * \param type_code The type code .
- * \return The name of type code.
- */
-inline const char* TypeCode2Str(int type_code);
-
-/*!
- * \brief convert a string to DGL type.
- * \param s The string to be converted.
- * \return The corresponding dgl type.
- */
-inline DGLType String2DGLType(std::string s);
-
-/*!
- * \brief convert a DGL type to string.
- * \param t The type to be converted.
- * \return The corresponding dgl type in string.
- */
-inline std::string DGLType2String(DGLType t);
-
-// macro to check type code.
-#define DGL_CHECK_TYPE_CODE(CODE, T)                           \
-  CHECK_EQ(CODE, T) << " expected "                            \
-  << TypeCode2Str(T) << " but get " << TypeCode2Str(CODE)      \
-
-/*!
  * \brief Type traits to mark if a class is dgl extension type.
  *
  * To enable extension type in C++ must be register () ed via marco.
@@ -520,19 +496,25 @@ class DGLArgValue : public DGLPODValue_ {
   const DGLValue& value() const {
     return value_;
   }
+
   // Deferred extension handler.
-  template<typename TNodeRef>
-  inline TNodeRef AsNodeRef() const;
+  template<typename TObjectRef>
+  inline TObjectRef AsObjectRef() const;
+
+  // Convert this value to arbitrary class type
   template<typename T,
            typename = typename std::enable_if<
              std::is_class<T>::value>::type>
   inline operator T() const;
-  template<typename TNodeRef,
+
+  // Return true if the value is of TObjectRef type
+  template<typename TObjectRef,
            typename = typename std::enable_if<
-             std::is_class<TNodeRef>::value>::type>
-  inline bool IsNodeType() const;
+             std::is_class<TObjectRef>::value>::type>
+  inline bool IsObjectType() const;
+
   // get internal node ptr, if it is node
-  inline std::shared_ptr<Node>& node_sptr();
+  inline std::shared_ptr<Object>& obj_sptr();
 };
 
 /*!
@@ -642,6 +624,11 @@ class DGLRetValue : public DGLPODValue_ {
     value_.v_type = t;
     return *this;
   }
+  DGLRetValue& operator=(DGLContext ctx) {
+    this->SwitchToPOD(kDGLContext);
+    value_.v_ctx = ctx;
+    return *this;
+  }
   DGLRetValue& operator=(bool value) {
     this->SwitchToPOD(kDLInt);
     value_.v_int64 = value;
@@ -709,21 +696,21 @@ class DGLRetValue : public DGLPODValue_ {
   }
   /*! \return The value field, if the data is POD */
   const DGLValue& value() const {
-    CHECK(type_code_ != kNodeHandle &&
+    CHECK(type_code_ != kObjectHandle &&
           type_code_ != kFuncHandle &&
           type_code_ != kModuleHandle &&
           type_code_ != kStr) << "DGLRetValue.value can only be used for POD data";
     return value_;
   }
-  // NodeRef related extenstions: in dgl/packed_func_ext.h
+  // ObjectRef related extenstions: in dgl/packed_func_ext.h
   template<typename T,
            typename = typename std::enable_if<
              std::is_class<T>::value>::type>
   inline operator T() const;
-  template<typename TNodeRef>
-  inline TNodeRef AsNodeRef() const;
-  inline DGLRetValue& operator=(const NodeRef& other);
-  inline DGLRetValue& operator=(const std::shared_ptr<Node>& other);
+  template<typename TObjectRef>
+  inline TObjectRef AsObjectRef() const;
+  inline DGLRetValue& operator=(const ObjectRef& other);
+  inline DGLRetValue& operator=(const std::shared_ptr<Object>& other);
 
  private:
   template<typename T>
@@ -749,9 +736,9 @@ class DGLRetValue : public DGLPODValue_ {
         *this = other.operator NDArray();
         break;
       }
-      case kNodeHandle: {
-        SwitchToClass<std::shared_ptr<Node> >(
-            kNodeHandle, *other.template ptr<std::shared_ptr<Node> >());
+      case kObjectHandle: {
+        SwitchToClass<std::shared_ptr<Object> >(
+            kObjectHandle, *other.template ptr<std::shared_ptr<Object> >());
         break;
       }
       default: {
@@ -793,10 +780,10 @@ class DGLRetValue : public DGLPODValue_ {
   void Clear() {
     if (type_code_ == kNull) return;
     switch (type_code_) {
-      case kStr: delete ptr<std::string>(); break;
+      case kStr: case kBytes: delete ptr<std::string>(); break;
       case kFuncHandle: delete ptr<PackedFunc>(); break;
       case kModuleHandle: delete ptr<Module>(); break;
-      case kNodeHandle: delete ptr<std::shared_ptr<Node> >(); break;
+      case kObjectHandle: delete ptr<std::shared_ptr<Object> >(); break;
       case kNDArrayContainer: {
         static_cast<NDArray::Container*>(value_.v_handle)->DecRef();
         break;
@@ -814,83 +801,6 @@ class DGLRetValue : public DGLPODValue_ {
 };
 
 // implementation details
-inline const char* TypeCode2Str(int type_code) {
-  switch (type_code) {
-    case kDLInt: return "int";
-    case kDLUInt: return "uint";
-    case kDLFloat: return "float";
-    case kStr: return "str";
-    case kBytes: return "bytes";
-    case kHandle: return "handle";
-    case kNull: return "NULL";
-    case kNodeHandle: return "NodeHandle";
-    case kArrayHandle: return "ArrayHandle";
-    case kDGLType: return "DGLType";
-    case kDGLContext: return "DGLContext";
-    case kFuncHandle: return "FunctionHandle";
-    case kModuleHandle: return "ModuleHandle";
-    case kNDArrayContainer: return "NDArrayContainer";
-    default: LOG(FATAL) << "unknown type_code="
-                        << static_cast<int>(type_code); return "";
-  }
-}
-
-#ifndef _LIBCPP_SGX_NO_IOSTREAMS
-inline std::ostream& operator<<(std::ostream& os, DGLType t) {  // NOLINT(*)
-  os << TypeCode2Str(t.code);
-  if (t.code == kHandle) return os;
-  os << static_cast<int>(t.bits);
-  if (t.lanes != 1) {
-    os << 'x' << static_cast<int>(t.lanes);
-  }
-  return os;
-}
-#endif
-
-inline std::string DGLType2String(DGLType t) {
-#ifndef _LIBCPP_SGX_NO_IOSTREAMS
-  std::ostringstream os;
-  os << t;
-  return os.str();
-#else
-  std::string repr = "";
-  repr += TypeCode2Str(t.code);
-  if (t.code == kHandle) return repr;
-  repr += std::to_string(static_cast<int>(t.bits));
-  if (t.lanes != 1) {
-    repr += "x" + std::to_string(static_cast<int>(t.lanes));
-  }
-  return repr;
-#endif
-}
-
-inline DGLType String2DGLType(std::string s) {
-  DGLType t;
-  t.bits = 32; t.lanes = 1;
-  const char* scan;
-  if (s.substr(0, 3) == "int") {
-    t.code = kDLInt;  scan = s.c_str() + 3;
-  } else if (s.substr(0, 4) == "uint") {
-    t.code = kDLUInt; scan = s.c_str() + 4;
-  } else if (s.substr(0, 5) == "float") {
-    t.code = kDLFloat; scan = s.c_str() + 5;
-  } else if (s.substr(0, 6) == "handle") {
-    t.code = kHandle;
-    t.bits = 64;  // handle uses 64 bit by default.
-    scan = s.c_str() + 6;
-  } else {
-    scan = s.c_str();
-    LOG(FATAL) << "unknown type " << s;
-  }
-  char* xdelim;  // emulate sscanf("%ux%u", bits, lanes)
-  uint8_t bits = static_cast<uint8_t>(strtoul(scan, &xdelim, 10));
-  if (bits != 0) t.bits = bits;
-  if (*xdelim == 'x') {
-    t.lanes = static_cast<uint16_t>(strtoul(xdelim + 1, nullptr, 10));
-  }
-  return t;
-}
-
 inline DGLArgValue DGLArgs::operator[](int i) const {
   CHECK_LT(i, num_args)
       << "not enough argument passed, "
@@ -1031,8 +941,8 @@ class DGLArgsSetter {
            typename = typename std::enable_if<
              extension_class_info<T>::code != 0>::type>
   inline void operator()(size_t i, const T& value) const;
-  // NodeRef related extenstions: in dgl/packed_func_ext.h
-  inline void operator()(size_t i, const NodeRef& other) const;  // NOLINT(*)
+  // ObjectRef related extenstions: in dgl/packed_func_ext.h
+  inline void operator()(size_t i, const ObjectRef& other) const;  // NOLINT(*)
 
  private:
   /*! \brief The values fields */
@@ -1141,7 +1051,7 @@ namespace detail {
 template<typename T, typename TSrc, bool is_ext>
 struct DGLValueCast {
   static T Apply(const TSrc* self) {
-    return self->template AsNodeRef<T>();
+    return self->template AsObjectRef<T>();
   }
 };
 

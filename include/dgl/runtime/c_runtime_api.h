@@ -3,7 +3,7 @@
  * \file dgl/runtime/c_runtime_api.h
  * \brief DGL runtime library.
  *
- * This runtime is adapted from TVM project
+ * This runtime is adapted from TVM project (commit: 2ce5277)
  */
 #ifndef DGL_RUNTIME_C_RUNTIME_API_H_
 #define DGL_RUNTIME_C_RUNTIME_API_H_
@@ -33,7 +33,7 @@
 #endif
 
 // DGL version
-#define DGL_VERSION "0.2"
+#define DGL_VERSION "0.4"
 
 
 // DGL Runtime is DLPack compatible.
@@ -72,7 +72,7 @@ typedef enum {
   kDGLType = 5U,
   kDGLContext = 6U,
   kArrayHandle = 7U,
-  kNodeHandle = 8U,
+  kObjectHandle = 8U,
   kModuleHandle = 9U,
   kFuncHandle = 10U,
   kStr = 11U,
@@ -474,8 +474,8 @@ DGL_DLL int DGLArrayFromDLPack(DLManagedTensor* from,
  * \param out The DLManagedTensor handle.
  * \return 0 when success, -1 when failure happens
  */
-DGL_DLL int DGLArrayToDLPack(DGLArrayHandle from,
-                             DLManagedTensor** out);
+DGL_DLL int DGLArrayToDLPack(DGLArrayHandle from, DLManagedTensor** out,
+                             int alignment = 0);
 
 /*!
  * \brief Delete (free) a DLManagedTensor's data.

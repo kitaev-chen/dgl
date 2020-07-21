@@ -8,7 +8,9 @@
 
 #include <vector>
 #include <string>
+#include <memory>
 
+#include "./runtime/object.h"
 #include "graph_interface.h"
 
 namespace dgl {
@@ -23,7 +25,7 @@ class ImmutableGraph;
  * in a more compact format. We store extra information,
  * such as the node and edge mapping from the NodeFlow graph to the parent graph.
  */
-struct NodeFlow {
+struct NodeFlowObject : public runtime::Object {
   /*! \brief The graph. */
   GraphPtr graph;
   /*!
@@ -42,6 +44,20 @@ struct NodeFlow {
    * \brief The edge mapping from the NodeFlow graph to the parent graph.
    */
   IdArray edge_mapping;
+
+  static constexpr const char* _type_key = "graph.NodeFlow";
+  DGL_DECLARE_OBJECT_TYPE_INFO(NodeFlowObject, runtime::Object);
+};
+
+// Define NodeFlow as the reference class of NodeFlowObject
+class NodeFlow : public runtime::ObjectRef {
+ public:
+  DGL_DEFINE_OBJECT_REF_METHODS(NodeFlow, runtime::ObjectRef, NodeFlowObject);
+
+  /*! \brief create a new nodeflow reference */
+  static NodeFlow Create() {
+    return NodeFlow(std::make_shared<NodeFlowObject>());
+  }
 };
 
 /*!

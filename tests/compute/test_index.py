@@ -3,7 +3,9 @@ import dgl.ndarray as nd
 from dgl.utils import toindex
 import numpy as np
 import backend as F
+import unittest
 
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
 def test_dlpack():
     # test dlpack conversion.
     def nd2th():
@@ -68,7 +70,7 @@ def test_index():
     assert np.allclose(ans, y2)
     assert np.allclose(ans, y3)
 
-    # from torch
+    # from dl tensor
     data = F.ones((10,), dtype=F.int64) * 10
     idx = toindex(data)
     y1 = idx.tonumpy()

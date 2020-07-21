@@ -1,19 +1,28 @@
 """Utility module."""
 from __future__ import absolute_import, division
 
-import ctypes
 from collections.abc import Mapping, Iterable
+from collections import defaultdict
 from functools import wraps
 import numpy as np
 
-from . import _api_internal
-from .base import DGLError
+from .base import DGLError, dgl_warning
 from . import backend as F
 from . import ndarray as nd
 
+
+class InconsistentDtypeException(DGLError):
+    """Exception class for inconsistent dtype between graph and tensor"""
+    def __init__(self, msg='', *args, **kwargs): #pylint: disable=W1113
+        prefix_message = 'DGL now requires the input tensor to have\
+            the same dtype as the graph index\'s dtype(which you can get by g.idype). '
+        super().__init__(prefix_message + msg, *args, **kwargs)
+
 class Index(object):
     """Index class that can be easily converted to list/tensor."""
-    def __init__(self, data):
+    def __init__(self, data, dtype="int64"):
+        assert dtype in ['int32', 'int64']
+        self.dtype = dtype
         self._initialize_data(data)
 
     def _initialize_data(self, data):
@@ -45,18 +54,22 @@ class Index(object):
     def _dispatch(self, data):
         """Store data based on its type."""
         if F.is_tensor(data):
-            if F.dtype(data) != F.int64:
-                raise DGLError('Index data must be an int64 vector, but got: %s' % str(data))
+            if F.dtype(data) != F.data_type_dict[self.dtype]:
+                raise InconsistentDtypeException('Index data specified as %s, but got: %s' %
+                                                 (self.dtype,
+                                                  F.reverse_data_type_dict[F.dtype(data)]))
             if len(F.shape(data)) > 1:
-                raise DGLError('Index data must be 1D int64 vector, but got: %s' % str(data))
+                raise InconsistentDtypeException('Index data must be 1D int32/int64 vector,\
+                    but got shape: %s' % str(F.shape(data)))
             if len(F.shape(data)) == 0:
                 # a tensor of one int
                 self._dispatch(int(data))
             else:
                 self._user_tensor_data[F.context(data)] = data
         elif isinstance(data, nd.NDArray):
-            if not (data.dtype == 'int64' and len(data.shape) == 1):
-                raise DGLError('Index data must be 1D int64 vector, but got: %s' % str(data))
+            if not (data.dtype == self.dtype and len(data.shape) == 1):
+                raise InconsistentDtypeException('Index data must be 1D %s vector, but got: %s' %
+                                                 (self.dtype, data.dtype))
             self._dgl_tensor_data = data
         elif isinstance(data, slice):
             # save it in the _pydata temporarily; materialize it if `tonumpy` is called
@@ -65,7 +78,7 @@ class Index(object):
             self._slice_data = slice(data.start, data.stop)
         else:
             try:
-                data = np.array(data).astype(np.int64)
+                data = np.asarray(data, dtype=self.dtype)
             except Exception:  # pylint: disable=broad-except
                 raise DGLError('Error index data: %s' % str(data))
             if data.ndim == 0:  # scalar array
@@ -81,7 +94,7 @@ class Index(object):
         if self._pydata is None:
             if self._slice_data is not None:
                 slc = self._slice_data
-                self._pydata = np.arange(slc.start, slc.stop).astype(np.int64)
+                self._pydata = np.arange(slc.start, slc.stop).astype(self.dtype)
             elif self._dgl_tensor_data is not None:
                 self._pydata = self._dgl_tensor_data.asnumpy()
             else:
@@ -130,12 +143,22 @@ class Index(object):
     def __getstate__(self):
         if self._slice_data is not None:
             # the index can be represented by a slice
-            return self._slice_data
+            return self._slice_data, self.dtype
         else:
-            return self.tousertensor()
+            return self.tousertensor(), self.dtype
 
     def __setstate__(self, state):
-        self._initialize_data(state)
+        # Pickle compatibility check
+        # TODO: we should store a storage version number in later releases.
+        if isinstance(state, tuple) and len(state) == 2:
+            # post-0.4.4
+            data, self.dtype = state
+            self._initialize_data(data)
+        else:
+            # pre-0.4.3
+            dgl_warning("The object is pickled before 0.4.3.  Setting dtype of graph to int64")
+            self.dtype = 'int64'
+            self._initialize_data(state)
 
     def get_items(self, index):
         """Return values at given positions of an Index
@@ -157,18 +180,22 @@ class Index(object):
             # the provided index is not a slice
             tensor = self.tousertensor()
             index = index.tousertensor()
-            return Index(F.gather_row(tensor, index))
+            # TODO(Allen): Change F.gather_row to dgl operation
+            return Index(F.gather_row(tensor, index), self.dtype)
         elif self._slice_data is None:
             # the current index is not a slice but the provided is a slice
             tensor = self.tousertensor()
             index = index._slice_data
-            return Index(F.narrow_row(tensor, index.start, index.stop))
+            # TODO(Allen): Change F.narrow_row to dgl operation
+            return Index(F.astype(F.narrow_row(tensor, index.start, index.stop),
+                                  F.data_type_dict[self.dtype]),
+                         self.dtype)
         else:
             # both self and index wrap a slice object, then return another
             # Index wrapping a slice
             start = self._slice_data.start
             index = index._slice_data
-            return Index(slice(start + index.start, start + index.stop))
+            return Index(slice(start + index.start, start + index.stop), self.dtype)
 
     def set_items(self, index, value):
         """Set values at given positions of an Index. Set is not done in place,
@@ -193,7 +220,7 @@ class Index(object):
             value = F.full_1d(len(index), value, dtype=F.int64, ctx=F.cpu())
         else:
             value = value.tousertensor()
-        return Index(F.scatter_row(tensor, index, value))
+        return Index(F.scatter_row(tensor, index, value), self.dtype)
 
     def append_zeros(self, num):
         """Append zeros to an Index
@@ -207,24 +234,24 @@ class Index(object):
             return self
         new_items = F.zeros((num,), dtype=F.int64, ctx=F.cpu())
         if len(self) == 0:
-            return Index(new_items)
+            return Index(new_items, self.dtype)
         else:
             tensor = self.tousertensor()
             tensor = F.cat((tensor, new_items), dim=0)
-            return Index(tensor)
+            return Index(tensor, self.dtype)
 
     def nonzero(self):
         """Return the nonzero positions"""
         tensor = self.tousertensor()
         mask = F.nonzero_1d(tensor != 0)
-        return Index(mask)
+        return Index(mask, self.dtype)
 
     def has_nonzero(self):
         """Check if there is any nonzero value in this Index"""
         tensor = self.tousertensor()
         return F.sum(tensor, 0) > 0
 
-def toindex(data):
+def toindex(data, dtype='int64'):
     """Convert the given data to Index object.
 
     Parameters
@@ -241,16 +268,40 @@ def toindex(data):
     --------
     Index
     """
-    return data if isinstance(data, Index) else Index(data)
+    return data if isinstance(data, Index) else Index(data, dtype)
 
-def zero_index(size):
+def zero_index(size, dtype="int64"):
     """Create a index with provided size initialized to zero
 
     Parameters
     ----------
     size: int
     """
-    return Index(F.zeros((size,), dtype=F.int64, ctx=F.cpu()))
+    return Index(F.zeros((size,), dtype=F.data_type_dict[dtype], ctx=F.cpu()),
+                 dtype=dtype)
+
+def set_diff(ar1, ar2):
+    """Find the set difference of two index arrays.
+    Return the unique values in ar1 that are not in ar2.
+
+    Parameters
+    ----------
+    ar1: utils.Index
+        Input index array.
+
+    ar2: utils.Index
+        Input comparison index array.
+
+    Returns
+    -------
+    setdiff:
+        Array of values in ar1 that are not in ar2.
+    """
+    ar1_np = ar1.tonumpy()
+    ar2_np = ar2.tonumpy()
+    setdiff = np.setdiff1d(ar1_np, ar2_np)
+    setdiff = toindex(setdiff)
+    return setdiff
 
 class LazyDict(Mapping):
     """A readonly dictionary that does not materialize the storage."""
@@ -259,7 +310,7 @@ class LazyDict(Mapping):
         self._keys = keys
 
     def __getitem__(self, key):
-        if not key in self._keys:
+        if key not in self._keys:
             raise KeyError(key)
         return self._fn(key)
 
@@ -336,7 +387,7 @@ def build_relabel_map(x, is_sorted=False):
     >>> n2o
     [1, 3, 5, 6]
     >>> o2n
-    [n/a, 0, n/a, 2, n/a, 3, 4]
+    [n/a, 0, n/a, 1, n/a, 2, 3]
 
     "n/a" will be filled with 0
 
@@ -363,7 +414,7 @@ def build_relabel_map(x, is_sorted=False):
         unique_x = x
     map_len = int(F.asnumpy(F.max(unique_x, dim=0))) + 1
     old_to_new = F.zeros((map_len,), dtype=F.int64, ctx=F.cpu())
-    F.scatter_row_inplace(old_to_new, unique_x, F.arange(0, len(unique_x)))
+    old_to_new = F.scatter_row(old_to_new, unique_x, F.arange(0, len(unique_x)))
     return unique_x, old_to_new
 
 def build_relabel_dict(x):
@@ -401,7 +452,7 @@ class CtxCachedObject(object):
         self._ctx_dict = {}
 
     def __call__(self, ctx):
-        if not ctx in self._ctx_dict:
+        if ctx not in self._ctx_dict:
             self._ctx_dict[ctx] = self._generator(ctx)
         return self._ctx_dict[ctx]
 
@@ -421,11 +472,14 @@ def cached_member(cache, prefix):
     """
     def _creator(func):
         @wraps(func)
-        def wrapper(self, *args):
+        def wrapper(self, *args, **kwargs):
             dic = getattr(self, cache)
-            key = '%s-%s' % (prefix, '-'.join([str(a) for a in args]))
-            if not key in dic:
-                dic[key] = func(self, *args)
+            key = '%s-%s-%s' % (
+                prefix,
+                '-'.join([str(a) for a in args]),
+                '-'.join([str(k) + ':' + str(v) for k, v in kwargs.items()]))
+            if key not in dic:
+                dic[key] = func(self, *args, **kwargs)
             return dic[key]
         return wrapper
     return _creator
@@ -469,47 +523,140 @@ def is_iterable(obj):
     """Return true if the object is an iterable."""
     return isinstance(obj, Iterable)
 
-def get_ndata_name(g, name):
-    """Return a node data name that does not exist in the given graph.
+def to_dgl_context(ctx):
+    """Convert a backend context to DGLContext"""
+    device_type = nd.DGLContext.STR2MASK[F.device_type(ctx)]
+    device_id = F.device_id(ctx)
+    return nd.DGLContext(device_type, device_id)
 
-    The given name is directly returned if it does not exist in the given graph.
+def to_nbits_int(tensor, nbits):
+    """Change the dtype of integer tensor
+    The dtype of returned tensor uses nbits, nbits can only be 32 or 64
+    """
+    assert(nbits in (32, 64)), "nbits can either be 32 or 64"
+    if nbits == 32:
+        return F.astype(tensor, F.int32)
+    else:
+        return F.astype(tensor, F.int64)
+
+def make_invmap(array, use_numpy=True):
+    """Find the unique elements of the array and return another array with indices
+    to the array of unique elements."""
+    if use_numpy:
+        uniques = np.unique(array)
+    else:
+        uniques = list(set(array))
+    invmap = {x: i for i, x in enumerate(uniques)}
+    remapped = np.asarray([invmap[x] for x in array])
+    return uniques, invmap, remapped
+
+def expand_as_pair(input_):
+    """Return a pair of same element if the input is not a pair.
+    """
+    if isinstance(input_, tuple):
+        return input_
+    else:
+        return input_, input_
+
+def check_eq_shape(input_):
+    """If input_ is a pair of features, check if the feature shape of source
+    nodes is equal to the feature shape of destination nodes.
+    """
+    srcdata, dstdata = expand_as_pair(input_)
+    src_feat_shape = tuple(F.shape(srcdata))[1:]
+    dst_feat_shape = tuple(F.shape(dstdata))[1:]
+    if src_feat_shape != dst_feat_shape:
+        raise DGLError("The feature shape of source nodes: {} \
+            should be equal to the feature shape of destination \
+            nodes: {}.".format(src_feat_shape, dst_feat_shape))
+
+def retry_method_with_fix(fix_method):
+    """Decorator that executes a fix method before retrying again when the decorated method
+    fails once with any exception.
+
+    If the decorated method fails again, the execution fails with that exception.
+
+    Notes
+    -----
+    This decorator only works on class methods, and the fix function must also be a class method.
+    It would not work on functions.
 
     Parameters
     ----------
-    g : DGLGraph
-        The graph.
-    name : str
-        The proposed name.
-
-    Returns
-    -------
-    str
-        The node data name that does not exist.
+    fix_func : callable
+        The fix method to execute.  It should not accept any arguments.  Its return values are
+        ignored.
     """
-    while name in g.ndata:
-        name += '_'
-    return name
+    def _creator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            # pylint: disable=W0703,bare-except
+            try:
+                return func(self, *args, **kwargs)
+            except:
+                fix_method(self)
+                return func(self, *args, **kwargs)
 
-def unwrap_to_ptr_list(wrapper):
-    """Convert the internal vector wrapper to a python list of ctypes.c_void_p.
+        return wrapper
+    return _creator
 
-    The wrapper will be destroyed after this function.
+def group_as_dict(pairs):
+    """Combines a list of key-value pairs to a dictionary of keys and value lists.
+
+    Does not require the pairs to be sorted by keys.
 
     Parameters
     ----------
-    wrapper : ctypes.c_void_p
-        The handler to the wrapper.
+    pairs : iterable
+        Iterable of key-value pairs
 
     Returns
     -------
-    list of ctypes.c_void_p
-        A python list of void pointers.
+    dict
+        The dictionary of keys and value lists.
     """
-    size = _api_internal._GetVectorWrapperSize(wrapper)
-    if size == 0:
-        return []
-    data = _api_internal._GetVectorWrapperData(wrapper)
-    data = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p * size))
-    rst = [ctypes.c_void_p(x) for x in data.contents]
-    _api_internal._FreeVectorWrapper(wrapper)
-    return rst
+    dic = defaultdict(list)
+    for key, value in pairs:
+        dic[key].append(value)
+    return dic
+
+class FlattenedDict(object):
+    """Iterates over each item in a dictionary of groups.
+
+    Parameters
+    ----------
+    groups : dict
+        The item groups.
+
+    Examples
+    --------
+    >>> groups = FlattenedDict({'a': [1, 3], 'b': [2, 5, 8], 'c': [7]})
+    >>> list(groups)
+    [('a', 1), ('a', 3), ('b', 2), ('b', 5), ('b', 8), ('c', 7)]
+    >>> groups[2]
+    ('b', 2)
+    >>> len(groups)
+    6
+    """
+    def __init__(self, groups):
+        self._groups = groups
+        group_sizes = {k: len(v) for k, v in groups.items()}
+        self._group_keys, self._group_sizes = zip(*group_sizes.items())
+        self._group_offsets = np.insert(np.cumsum(self._group_sizes), 0, 0)
+
+    def __len__(self):
+        """Return the total number of items."""
+        return self._group_offsets[-1]
+
+    def __iter__(self):
+        """Return the iterator of all items with the key of its original group."""
+        for i, k in enumerate(self._group_keys):
+            for j in range(self._group_sizes[i]):
+                yield k, self._groups[k][j]
+
+    def __getitem__(self, idx):
+        """Return the item at the given position with the key of its original group."""
+        i = np.searchsorted(self._group_offsets, idx, 'right') - 1
+        k = self._group_keys[i]
+        j = idx - self._group_offsets[i]
+        return k, self._groups[k][j]

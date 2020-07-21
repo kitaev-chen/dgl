@@ -2,6 +2,11 @@ import numpy as np
 from dgl.frame import Frame, FrameRef
 from dgl.utils import Index, toindex
 import backend as F
+import dgl
+import unittest
+import pickle
+import pytest
+import io
 
 N = 10
 D = 5
@@ -13,10 +18,10 @@ def check_fail(fn):
     except:
         return True
 
-def create_test_data(grad=False):
-    c1 = F.randn((N, D))
-    c2 = F.randn((N, D))
-    c3 = F.randn((N, D))
+def create_test_data(grad=False, dtype=F.float32):
+    c1 = F.astype(F.randn((N, D)), dtype)
+    c2 = F.astype(F.randn((N, D)), dtype)
+    c3 = F.astype(F.randn((N, D)), dtype)
     if grad:
         c1 = F.attach_grad(c1)
         c2 = F.attach_grad(c2)
@@ -113,7 +118,7 @@ def test_append2():
     assert not f.is_span_whole_column()
     assert f.num_rows == 3 * N
     new_idx = list(range(N)) + list(range(2*N, 4*N))
-    assert F.array_equal(f._index.tousertensor(), F.tensor(new_idx, dtype=F.int64))
+    assert F.array_equal(f._index.tousertensor(), F.copy_to(F.tensor(new_idx, dtype=F.int64), F.cpu()))
     assert data.num_rows == 4 * N
 
 def test_append3():
@@ -144,13 +149,13 @@ def test_row1():
     rows = f[rowid]
     for k, v in rows.items():
         assert tuple(F.shape(v)) == (len(rowid), D)
-        assert F.allclose(v, F.gather_row(data[k], rowid.tousertensor()))
+        assert F.allclose(v, F.gather_row(data[k], F.tensor(rowid.tousertensor())))
     # test duplicate keys
     rowid = Index(F.tensor([8, 2, 2, 1]))
     rows = f[rowid]
     for k, v in rows.items():
         assert tuple(F.shape(v)) == (len(rowid), D)
-        assert F.allclose(v, F.gather_row(data[k], rowid.tousertensor()))
+        assert F.allclose(v, F.gather_row(data[k], F.tensor(rowid.tousertensor())))
 
     # setter
     rowid = Index(F.tensor([0, 2, 4]))
@@ -181,7 +186,7 @@ def test_row2():
         rowid = Index(F.tensor([0, 2]))
         rows = f[rowid]
         y = rows['a1']
-    F.backward(y, F.ones((len(rowid), D)))
+        F.backward(y, F.ones((len(rowid), D)))
     assert F.allclose(F.grad(c1)[:,0], F.tensor([1., 0., 1., 0., 0., 0., 0., 0., 0., 0.]))
 
     f['a1'] = F.attach_grad(f['a1'])
@@ -191,7 +196,7 @@ def test_row2():
         rowid = Index(F.tensor([8, 2, 2, 1]))
         rows = f[rowid]
         y = rows['a1']
-    F.backward(y, F.ones((len(rowid), D)))
+        F.backward(y, F.ones((len(rowid), D)))
     assert F.allclose(F.grad(c1)[:,0], F.tensor([0., 1., 2., 0., 0., 0., 0., 0., 1., 0.]))
 
     f['a1'] = F.attach_grad(f['a1'])
@@ -205,7 +210,7 @@ def test_row2():
                 }
         f[rowid] = vals
         c11 = f['a1']
-    F.backward(c11, F.ones((N, D)))
+        F.backward(c11, F.ones((N, D)))
     assert F.allclose(F.grad(c1)[:,0], F.tensor([0., 1., 0., 1., 0., 1., 1., 1., 1., 1.]))
     assert F.allclose(F.grad(vals['a1']), F.ones((len(rowid), D)))
     assert F.is_no_grad(vals['a2'])
@@ -231,6 +236,8 @@ def test_row3():
     for k, v in f.items():
         assert F.allclose(v, data[k][newidx])
 
+
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
 def test_row4():
     # test updating row with empty frame but has preset num_rows
     f = FrameRef(Frame(num_rows=5))
@@ -240,6 +247,7 @@ def test_row4():
     ans[F.tensor([0, 2, 4])] = F.ones((3, 2))
     assert F.allclose(f['h'], ans)
 
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
 def test_sharing():
     data = Frame(create_test_data())
     f1 = FrameRef(data, index=toindex([0, 1, 2, 3]))
@@ -267,6 +275,7 @@ def test_sharing():
     F.narrow_row_set(f2_a1, 0, 2, F.ones([2, D]))
     assert F.allclose(f2['a1'], f2_a1)
 
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
 def test_slicing():
     data = Frame(create_test_data(grad=True))
     f1 = FrameRef(data, index=toindex(slice(1, 5)))
@@ -282,7 +291,7 @@ def test_slicing():
             'a3': F.zeros([2, D]),
             }
     assert F.allclose(f2['a1'], f2_a1)
-    
+
     f1[Index(F.tensor([2, 3]))] = {
             'a1': F.ones([2, D]),
             'a2': F.ones([2, D]),
@@ -314,6 +323,7 @@ def test_add_rows():
     ans = F.cat([F.zeros((4, 5)), F.ones((4, 5))], 0)
     assert F.allclose(f1['y'], ans)
 
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
 def test_inplace():
     f = FrameRef(Frame(create_test_data()))
     print(f.schemes)
@@ -349,6 +359,40 @@ def test_inplace():
     f.update_data(toindex([1, 3, 5]), {'a2' : F.ones((3, D))}, True)
     newa2addr = id(f['a2'])
     assert a2addr == newa2addr
+
+@unittest.skipIf(dgl.backend.backend_name == "tensorflow", reason="TF doesn't support inplace update")
+def test_clone():
+    f = FrameRef(Frame(create_test_data()))
+    f1 = f.clone()
+    f2 = f.deepclone()
+
+    f1['b'] = F.randn((N, D))
+    f2['c'] = F.randn((N, D))
+    assert 'b' not in f
+    assert 'c' not in f
+
+    f1['a1'][0, 0] = -10.
+    assert float(F.asnumpy(f['a1'][0, 0])) == -10.
+    x = float(F.asnumpy(f['a2'][0, 0]))
+    f2['a2'][0, 0] = -10.
+    assert float(F.asnumpy(f['a2'][0, 0])) == x
+
+def _reconstruct_pickle(obj):
+    f = io.BytesIO()
+    pickle.dump(obj, f)
+    f.seek(0)
+    obj = pickle.load(f)
+    f.close()
+    return obj
+
+@pytest.mark.parametrize('dtype',
+        [F.float32, F.int32] if dgl.backend.backend_name == "mxnet" else [F.float32, F.int32, F.bool])
+def test_pickle(dtype):
+    f = create_test_data(dtype=dtype)
+    newf = _reconstruct_pickle(f)
+    assert F.array_equal(f['a1'], newf['a1'])
+    assert F.array_equal(f['a2'], newf['a2'])
+    assert F.array_equal(f['a3'], newf['a3'])
 
 if __name__ == '__main__':
     test_create()

@@ -1,5 +1,6 @@
 """Module for degree bucketing schedulers."""
 from __future__ import absolute_import
+from functools import partial
 
 from .._ffi.function import _init_api
 from .. import backend as F
@@ -10,14 +11,14 @@ from . import ir
 from .ir import var
 
 def gen_degree_bucketing_schedule(
-        graph,
         reduce_udf,
         message_ids,
         dst_nodes,
         recv_nodes,
         var_nf,
         var_mf,
-        var_out):
+        var_out,
+        ntype=None):
     """Create degree bucketing schedule.
 
     The messages will be divided by their receivers into buckets. Each bucket
@@ -28,8 +29,6 @@ def gen_degree_bucketing_schedule(
 
     Parameters
     ----------
-    graph : DGLGraph
-        DGLGraph to use
     reduce_udf : callable
         The UDF to reduce messages.
     message_ids : utils.Index
@@ -47,6 +46,9 @@ def gen_degree_bucketing_schedule(
         The variable for message frame.
     var_out : var.FEAT_DICT
         The variable for output feature dicts.
+    ntype : str, optional
+        The node type, if running on a heterograph.
+        If None, assuming it's running on a homogeneous graph.
     """
     buckets = _degree_bucketing_schedule(message_ids, dst_nodes, recv_nodes)
     # generate schedule
@@ -56,7 +58,7 @@ def gen_degree_bucketing_schedule(
     fd_list = []
     for deg, vbkt, mid in zip(degs, buckets, msg_ids):
         # create per-bkt rfunc
-        rfunc = _create_per_bkt_rfunc(graph, reduce_udf, deg, vbkt)
+        rfunc = _create_per_bkt_rfunc(reduce_udf, deg, vbkt, ntype=ntype)
         # vars
         vbkt = var.IDX(vbkt)
         mid = var.IDX(mid)
@@ -117,11 +119,12 @@ def _process_node_buckets(buckets):
         The zero-degree nodes
     """
     # get back results
-    degs = utils.toindex(buckets(0))
-    v = utils.toindex(buckets(1))
+    dtype = buckets(0).dtype
+    degs = utils.toindex(buckets(0), dtype)
+    v = utils.toindex(buckets(1), dtype)
     # XXX: convert directly from ndarary to python list?
     v_section = buckets(2).asnumpy().tolist()
-    msg_ids = utils.toindex(buckets(3))
+    msg_ids = utils.toindex(buckets(3), dtype)
     msg_section = buckets(4).asnumpy().tolist()
 
     # split buckets
@@ -130,8 +133,8 @@ def _process_node_buckets(buckets):
     msg_ids = F.split(msg_ids, msg_section, 0)
 
     # convert to utils.Index
-    dsts = [utils.toindex(dst) for dst in dsts]
-    msg_ids = [utils.toindex(msg_id) for msg_id in msg_ids]
+    dsts = [utils.toindex(dst, dtype) for dst in dsts]
+    msg_ids = [utils.toindex(msg_id, dtype) for msg_id in msg_ids]
 
     # handle zero deg
     degs = degs.tonumpy()
@@ -144,7 +147,7 @@ def _process_node_buckets(buckets):
 
     return v, degs, dsts, msg_ids, zero_deg_nodes
 
-def _create_per_bkt_rfunc(graph, reduce_udf, deg, vbkt):
+def _create_per_bkt_rfunc(reduce_udf, deg, vbkt, ntype=None):
     """Internal function to generate the per degree bucket node UDF."""
     def _rfunc_wrapper(node_data, mail_data):
         def _reshaped_getter(key):
@@ -152,18 +155,19 @@ def _create_per_bkt_rfunc(graph, reduce_udf, deg, vbkt):
             new_shape = (len(vbkt), deg) + F.shape(msg)[1:]
             return F.reshape(msg, new_shape)
         reshaped_mail_data = utils.LazyDict(_reshaped_getter, mail_data.keys())
-        nbatch = NodeBatch(graph, vbkt, node_data, reshaped_mail_data)
+        nbatch = NodeBatch(vbkt, node_data, reshaped_mail_data, ntype=ntype)
         return reduce_udf(nbatch)
     return _rfunc_wrapper
 
 def gen_group_apply_edge_schedule(
-        graph,
         apply_func,
         u, v, eid,
         group_by,
-        var_nf,
+        var_src_nf,
+        var_dst_nf,
         var_ef,
-        var_out):
+        var_out,
+        canonical_etype=(None, None, None)):
     """Create degree bucketing schedule for group_apply_edge
 
     Edges will be grouped by either its source node or destination node
@@ -174,8 +178,6 @@ def gen_group_apply_edge_schedule(
 
     Parameters
     ----------
-    graph : DGLGraph
-        DGLGraph to use
     apply_func: callable
         The edge_apply_func UDF
     u: utils.Index
@@ -186,12 +188,17 @@ def gen_group_apply_edge_schedule(
         Edges to apply
     group_by: str
         If "src", group by u. If "dst", group by v
-    var_nf : var.FEAT_DICT
-        The variable for node feature frame.
+    var_src_nf : var.FEAT_DICT
+        The variable for source feature frame.
+    var_dst_nf : var.FEAT_DICT
+        The variable for destination feature frame.
     var_ef : var.FEAT_DICT
         The variable for edge frame.
     var_out : var.FEAT_DICT
         The variable for output feature dicts.
+    canonical_etype : tuple[str, str, str], optional
+        Canonical edge type if running on a heterograph.
+        Default: (None, None, None), if running on a homogeneous graph.
     """
     if group_by == "src":
         buckets = _degree_bucketing_for_edge_grouping(u, v, eid)
@@ -206,15 +213,16 @@ def gen_group_apply_edge_schedule(
     fd_list = []
     for deg, u_bkt, v_bkt, eid_bkt in zip(degs, uids, vids, eids):
         # create per-bkt efunc
-        _efunc = var.FUNC(_create_per_bkt_efunc(graph, apply_func, deg,
-                                                u_bkt, v_bkt, eid_bkt))
+        _efunc = var.FUNC(_create_per_bkt_efunc(apply_func, deg,
+                                                u_bkt, v_bkt, eid_bkt,
+                                                canonical_etype=canonical_etype))
         # vars
         var_u = var.IDX(u_bkt)
         var_v = var.IDX(v_bkt)
         var_eid = var.IDX(eid_bkt)
         # apply edge UDF on each bucket
-        fdsrc = ir.READ_ROW(var_nf, var_u)
-        fddst = ir.READ_ROW(var_nf, var_v)
+        fdsrc = ir.READ_ROW(var_src_nf, var_u)
+        fddst = ir.READ_ROW(var_dst_nf, var_v)
         fdedge = ir.READ_ROW(var_ef, var_eid)
         fdedge = ir.EDGE_UDF(_efunc, fdsrc, fdedge, fddst, ret=fdedge)  # reuse var
         # save for merge
@@ -260,24 +268,25 @@ def _process_edge_buckets(buckets):
         A list of edge id buckets
     """
     # get back results
+    dtype = buckets(0).dtype
     degs = buckets(0).asnumpy()
-    uids = utils.toindex(buckets(1))
-    vids = utils.toindex(buckets(2))
-    eids = utils.toindex(buckets(3))
+    uids = utils.toindex(buckets(1), dtype)
+    vids = utils.toindex(buckets(2), dtype)
+    eids = utils.toindex(buckets(3), dtype)
     # XXX: convert directly from ndarary to python list?
     sections = buckets(4).asnumpy().tolist()
 
     # split buckets and convert to index
     def split(to_split):
         res = F.split(to_split.tousertensor(), sections, 0)
-        return map(utils.toindex, res)
+        return map(partial(utils.toindex, dtype=dtype), res)
 
     uids = split(uids)
     vids = split(vids)
     eids = split(eids)
     return degs, uids, vids, eids
 
-def _create_per_bkt_efunc(graph, apply_func, deg, u, v, eid):
+def _create_per_bkt_efunc(apply_func, deg, u, v, eid, canonical_etype=(None, None, None)):
     """Internal function to generate the per degree bucket edge UDF."""
     batch_size = len(u) // deg
     def _efunc_wrapper(src_data, edge_data, dst_data):
@@ -299,8 +308,9 @@ def _create_per_bkt_efunc(graph, apply_func, deg, u, v, eid):
                                             edge_data.keys())
         reshaped_dst_data = utils.LazyDict(_reshape_func(dst_data),
                                            dst_data.keys())
-        ebatch = EdgeBatch(graph, (u, v, eid), reshaped_src_data,
-                           reshaped_edge_data, reshaped_dst_data)
+        ebatch = EdgeBatch((u, v, eid), reshaped_src_data,
+                           reshaped_edge_data, reshaped_dst_data,
+                           canonical_etype=canonical_etype)
         return {k: _reshape_back(v) for k, v in apply_func(ebatch).items()}
     return _efunc_wrapper
 

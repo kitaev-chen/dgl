@@ -1,3 +1,4 @@
+import os
 import argparse, time, math
 import numpy as np
 from scipy import sparse as spsp
@@ -7,14 +8,11 @@ from dgl import DGLGraph
 from dgl.data import register_data_args, load_data
 
 class GraphData:
-    def __init__(self, csr, num_feats):
+    def __init__(self, csr, num_feats, graph_name):
         num_nodes = csr.shape[0]
         num_edges = mx.nd.contrib.getnnz(csr).asnumpy()[0]
-        edge_ids = np.arange(0, num_edges, step=1, dtype=np.int64)
-        csr = spsp.csr_matrix((edge_ids, csr.indices.asnumpy(), csr.indptr.asnumpy()),
-                              shape=csr.shape, dtype=np.int64)
-        self.graph = dgl.graph_index.GraphIndex(multigraph=False, readonly=True)
-        self.graph.from_csr_matrix(csr.indptr, csr.indices, "in")
+        self.graph = dgl.graph_index.from_csr(csr.indptr, csr.indices, False, 'in')
+        self.graph = self.graph.copyto_shared_mem(dgl.contrib.graph_store._get_graph_path(graph_name))
         self.features = mx.nd.random.normal(shape=(csr.shape[0], num_feats))
         self.num_labels = 10
         self.labels = mx.nd.floor(mx.nd.random.uniform(low=0, high=self.num_labels,
@@ -31,9 +29,9 @@ def main(args):
     if args.graph_file != '':
         csr = mx.nd.load(args.graph_file)[0]
         n_edges = csr.shape[0]
-        data = GraphData(csr, args.num_feats)
+        graph_name = os.path.basename(args.graph_file)
+        data = GraphData(csr, args.num_feats, graph_name)
         csr = None
-        graph_name = args.graph_file
     else:
         data = load_data(args)
         n_edges = data.graph.number_of_edges()
@@ -67,8 +65,9 @@ def main(args):
               n_test_samples))
 
     # create GCN model
+    print('graph name: ' + graph_name)
     g = dgl.contrib.graph_store.create_graph_store_server(data.graph, graph_name, "shared_mem",
-                                                          args.num_workers, False)
+                                                          args.num_workers, False, edge_dir='in')
     g.ndata['features'] = features
     g.ndata['labels'] = labels
     g.ndata['train_mask'] = train_mask

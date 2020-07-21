@@ -6,7 +6,7 @@ Graph Isomorphism Network (GIN)
 
 Dependencies
 ------------
-- PyTorch 1.0.1+
+- PyTorch 1.1.0+
 - sklearn
 - tqdm
 
@@ -35,7 +35,7 @@ Results
 Run with following with the double SUM pooling way:
 (tested dataset: "MUTAG"(default), "COLLAB", "IMDBBINARY", "IMDBMULTI")
 ```bash
-python train.py --dataset MUTAB --device 0  \
+python main.py --dataset MUTAG --device 0  \
                 --graph_pooling_type sum --neighbor_pooling_type sum
 ```
 

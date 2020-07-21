@@ -9,13 +9,16 @@ import scipy.sparse as sp
 import backend as F
 
 import itertools
+from utils import parametrize_dtype
 
 np.random.seed(42)
 
 def toset(x):
+    # F.zerocopy_to_numpy may return a int
     return set(F.zerocopy_to_numpy(x).tolist())
 
-def test_bfs(n=1000):
+@parametrize_dtype
+def test_bfs(index_dtype, n=100):
     def _bfs_nx(g_nx, src):
         edges = nx.bfs_edges(g_nx, src)
         layers_nx = [set([src])]
@@ -31,13 +34,20 @@ def test_bfs(n=1000):
                 edges_nx.append(edge_frontier)
                 frontier = set([v])
                 edge_frontier = set([g.edge_id(u, v)])
-        layers_nx.append(frontier)
-        edges_nx.append(edge_frontier)
+        # avoids empty successors
+        if len(frontier) > 0 and len(edge_frontier) > 0:
+            layers_nx.append(frontier)
+            edges_nx.append(edge_frontier)
         return layers_nx, edges_nx
 
     g = dgl.DGLGraph()
-    a = sp.random(n, n, 10 / n, data_rvs=lambda n: np.ones(n))
+    a = sp.random(n, n, 3 / n, data_rvs=lambda n: np.ones(n))
     g.from_scipy_sparse_matrix(a)
+    if index_dtype == 'int32':
+        g = dgl.graph(g.edges()).int()
+    else:
+        g = dgl.graph(g.edges()).long()
+
     g_nx = g.to_networkx()
     src = random.choice(range(n))
     layers_nx, _ = _bfs_nx(g_nx, src)
@@ -48,30 +58,40 @@ def test_bfs(n=1000):
     g_nx = nx.random_tree(n, seed=42)
     g = dgl.DGLGraph()
     g.from_networkx(g_nx)
+    if index_dtype == 'int32':
+        g = dgl.graph(g.edges()).int()
+    else:
+        g = dgl.graph(g.edges()).long()
+
     src = 0
     _, edges_nx = _bfs_nx(g_nx, src)
     edges_dgl = dgl.bfs_edges_generator(g, src)
     assert len(edges_dgl) == len(edges_nx)
     assert all(toset(x) == y for x, y in zip(edges_dgl, edges_nx))
 
-def test_topological_nodes(n=1000):
+@parametrize_dtype
+def test_topological_nodes(index_dtype, n=100):
     g = dgl.DGLGraph()
-    a = sp.random(n, n, 10 / n, data_rvs=lambda n: np.ones(n))
+    a = sp.random(n, n, 3 / n, data_rvs=lambda n: np.ones(n))
     b = sp.tril(a, -1).tocoo()
     g.from_scipy_sparse_matrix(b)
+    if index_dtype == 'int32':
+        g = dgl.graph(g.edges()).int()
+    else:
+        g = dgl.graph(g.edges()).long()
 
     layers_dgl = dgl.topological_nodes_generator(g)
 
     adjmat = g.adjacency_matrix()
     def tensor_topo_traverse():
         n = g.number_of_nodes()
-        mask = F.ones((n, 1))
+        mask = F.copy_to(F.ones((n, 1)), F.cpu())
         degree = F.spmm(adjmat, mask)
         while F.reduce_sum(mask) != 0.:
             v = F.astype((degree == 0.), F.float32)
             v = v * mask
             mask = mask - v
-            frontier = F.nonzero_1d(F.squeeze(v, 1))
+            frontier = F.copy_to(F.nonzero_1d(F.squeeze(v, 1)), F.cpu())
             yield frontier
             degree -= F.spmm(adjmat, v)
 
@@ -81,15 +101,19 @@ def test_topological_nodes(n=1000):
     assert all(toset(x) == toset(y) for x, y in zip(layers_dgl, layers_spmv))
 
 DFS_LABEL_NAMES = ['forward', 'reverse', 'nontree']
-def test_dfs_labeled_edges(n=1000, example=False):
+@parametrize_dtype
+def test_dfs_labeled_edges(index_dtype, example=False):
     dgl_g = dgl.DGLGraph()
     dgl_g.add_nodes(6)
     dgl_g.add_edges([0, 1, 0, 3, 3], [1, 2, 2, 4, 5])
+    if index_dtype == 'int32':
+        dgl_g = dgl.graph(dgl_g.edges()).int()
+    else:
+        dgl_g = dgl.graph(dgl_g.edges()).long()
     dgl_edges, dgl_labels = dgl.dfs_labeled_edges_generator(
             dgl_g, [0, 3], has_reverse_edge=True, has_nontree_edge=True)
     dgl_edges = [toset(t) for t in dgl_edges]
     dgl_labels = [toset(t) for t in dgl_labels]
-
     g1_solutions = [
             # edges           labels
             [[0, 1, 1, 0, 2], [0, 0, 1, 1, 2]],
@@ -116,8 +140,7 @@ def test_dfs_labeled_edges(n=1000, example=False):
     else:
         assert False
 
-
 if __name__ == '__main__':
-    test_bfs()
-    test_topological_nodes()
-    test_dfs_labeled_edges()
+    test_bfs(index_dtype='int32')
+    test_topological_nodes(index_dtype='int32')
+    test_dfs_labeled_edges(index_dtype='int32')
