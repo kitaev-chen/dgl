@@ -96,6 +96,7 @@ def get_local_usable_addr():
 
     return ip_addr + ':' + str(port)
 
+
 def connect_to_server(ip_config, max_queue_size=MAX_QUEUE_SIZE, net_type='socket'):
     """Connect this client to server.
 
@@ -126,6 +127,9 @@ def connect_to_server(ip_config, max_queue_size=MAX_QUEUE_SIZE, net_type='socket
     rpc.register_service(rpc.GET_NUM_CLIENT,
                          rpc.GetNumberClientsRequest,
                          rpc.GetNumberClientsResponse)
+    rpc.register_service(rpc.CLIENT_BARRIER,
+                         rpc.ClientBarrierRequest,
+                         rpc.ClientBarrierResponse)
     rpc.register_ctrl_c()
     server_namebook = rpc.read_ip_config(ip_config)
     num_servers = len(server_namebook)
@@ -170,12 +174,9 @@ def connect_to_server(ip_config, max_queue_size=MAX_QUEUE_SIZE, net_type='socket
     rpc.send_request(0, get_client_num_req)
     res = rpc.recv_response()
     rpc.set_num_client(res.num_client)
+    from .dist_context import exit_client, set_initialized
     atexit.register(exit_client)
-
-def finalize_client():
-    """Release resources of this client."""
-    rpc.finalize_sender()
-    rpc.finalize_receiver()
+    set_initialized()
 
 def shutdown_servers():
     """Issue commands to remote servers to shut them down.
@@ -184,15 +185,7 @@ def shutdown_servers():
     ------
     ConnectionError : If anything wrong with the connection.
     """
-    if rpc.get_rank() == 0: # Only client_0 issue this command
+    if rpc.get_rank() == 0:  # Only client_0 issue this command
         req = rpc.ShutDownRequest(rpc.get_rank())
         for server_id in range(rpc.get_num_server()):
             rpc.send_request(server_id, req)
-
-def exit_client():
-    """Register exit callback.
-    """
-    # Only client with rank_0 will send shutdown request to servers.
-    shutdown_servers()
-    finalize_client()
-    atexit.unregister(exit_client)
